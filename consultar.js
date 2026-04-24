@@ -1,4 +1,5 @@
 import { chromium } from 'playwright';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -331,6 +332,7 @@ async function procesarDetalle(page, numero, aliasCompleto, directorioSalida) {
     totalActuacionesEnPortal: totalEncontradas,
     actuacionesDevueltas: actuacionesRecientes.length,
     actuaciones: actuacionesRecientes,
+    rutaScreenshot,
   };
 
   await writeFile(rutaJson, JSON.stringify(resultado, null, 2), 'utf8');
@@ -448,6 +450,145 @@ function clasificarEntrada(entrada, umbral) {
   const ultima = actuaciones[0];
   const fechaUltima = ultima['Fecha de Registro'] ?? ultima['Fecha de Actuación'] ?? '?';
   return { tipo: 'sin-movimiento', fechaUltima };
+}
+
+async function generarPDFCompleto(entradas, directorioSalida, fechaConsulta) {
+  const pdf = await PDFDocument.create();
+  const fuente = await pdf.embedFont(StandardFonts.Helvetica);
+  const fuenteBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+  const ANCHO = 612; // carta en puntos (8.5 x 11 pulgadas)
+  const ALTO = 792;
+  const MARGEN = 36;
+  const CABECERA_ALTO = 48;
+  const COLOR_TEXTO = rgb(0.12, 0.12, 0.12);
+  const COLOR_GRIS = rgb(0.45, 0.45, 0.45);
+
+  // --- Portada ---
+  const portada = pdf.addPage([ANCHO, ALTO]);
+  const fechaStr = fechaISOEnBogota(fechaConsulta);
+  portada.drawText('Consulta de radicados', {
+    x: MARGEN,
+    y: ALTO - MARGEN - 30,
+    size: 22,
+    font: fuenteBold,
+    color: COLOR_TEXTO,
+  });
+  portada.drawText(`Rama Judicial · ${fechaStr}`, {
+    x: MARGEN,
+    y: ALTO - MARGEN - 58,
+    size: 13,
+    font: fuente,
+    color: COLOR_GRIS,
+  });
+
+  const umbral = new Date(fechaConsulta);
+  umbral.setDate(umbral.getDate() - DIAS_MOVIMIENTO_RECIENTE);
+  const conteo = { conMovimiento: 0, sinMovimiento: 0, sinActuaciones: 0, fallas: 0 };
+  for (const e of entradas) {
+    const clasif = clasificarEntrada(e, umbral);
+    if (clasif.tipo === 'falla') conteo.fallas += 1;
+    else if (clasif.tipo === 'sin-actuaciones') conteo.sinActuaciones += 1;
+    else if (clasif.tipo === 'con-movimiento') conteo.conMovimiento += 1;
+    else conteo.sinMovimiento += 1;
+  }
+
+  const lineasResumen = [
+    `Total de entradas procesadas: ${entradas.length}`,
+    `Con movimiento en los últimos ${DIAS_MOVIMIENTO_RECIENTE} días: ${conteo.conMovimiento}`,
+    `Sin movimiento reciente: ${conteo.sinMovimiento}`,
+    `Sin actuaciones registradas: ${conteo.sinActuaciones}`,
+    `Fallas: ${conteo.fallas}`,
+  ];
+  let y = ALTO - MARGEN - 110;
+  for (const linea of lineasResumen) {
+    portada.drawText(linea, { x: MARGEN, y, size: 12, font: fuente, color: COLOR_TEXTO });
+    y -= 18;
+  }
+
+  portada.drawText(
+    'Este documento consolida en un solo archivo las capturas de todas las',
+    { x: MARGEN, y: MARGEN + 30, size: 10, font: fuente, color: COLOR_GRIS },
+  );
+  portada.drawText(
+    'consultas realizadas. Cada página muestra el radicado, el alias y el PNG',
+    { x: MARGEN, y: MARGEN + 16, size: 10, font: fuente, color: COLOR_GRIS },
+  );
+  portada.drawText('generado por el script.', {
+    x: MARGEN,
+    y: MARGEN + 2,
+    size: 10,
+    font: fuente,
+    color: COLOR_GRIS,
+  });
+
+  // --- Una página por cada captura en el orden de las entradas ---
+  const entradasConCaptura = entradas.filter(
+    (e) => e.ok && e.resultado?.rutaScreenshot && existsSync(e.resultado.rutaScreenshot),
+  );
+
+  for (let i = 0; i < entradasConCaptura.length; i += 1) {
+    const e = entradasConCaptura[i];
+    const etiqueta = aliasConSubindice(e.alias, e.subindice);
+    const cabecera = `${etiqueta}  ·  ${e.numero}`;
+
+    let pngBytes;
+    try {
+      pngBytes = await readFile(e.resultado.rutaScreenshot);
+    } catch {
+      continue;
+    }
+
+    let imagen;
+    try {
+      imagen = await pdf.embedPng(pngBytes);
+    } catch {
+      continue;
+    }
+
+    const anchoUtil = ANCHO - MARGEN * 2;
+    const altoUtil = ALTO - MARGEN * 2 - CABECERA_ALTO;
+    const escala = Math.min(anchoUtil / imagen.width, altoUtil / imagen.height, 1);
+    const anchoDibujo = imagen.width * escala;
+    const altoDibujo = imagen.height * escala;
+
+    const pagina = pdf.addPage([ANCHO, ALTO]);
+    pagina.drawText(cabecera, {
+      x: MARGEN,
+      y: ALTO - MARGEN - 12,
+      size: 12,
+      font: fuenteBold,
+      color: COLOR_TEXTO,
+    });
+    pagina.drawText(`Página ${i + 1} de ${entradasConCaptura.length}`, {
+      x: MARGEN,
+      y: ALTO - MARGEN - 28,
+      size: 9,
+      font: fuente,
+      color: COLOR_GRIS,
+    });
+
+    const xImagen = MARGEN + (anchoUtil - anchoDibujo) / 2;
+    const yImagen = MARGEN + (altoUtil - altoDibujo) / 2;
+    pagina.drawImage(imagen, {
+      x: xImagen,
+      y: yImagen,
+      width: anchoDibujo,
+      height: altoDibujo,
+    });
+
+    if ((i + 1) % 10 === 0) {
+      console.log(`  · PDF: ${i + 1}/${entradasConCaptura.length} páginas embebidas…`);
+    }
+  }
+
+  const rutaPDF = path.join(
+    directorioSalida,
+    `consolidado_${timestampParaNombre(fechaConsulta)}.pdf`,
+  );
+  const bytes = await pdf.save();
+  await writeFile(rutaPDF, bytes);
+  return { rutaPDF, paginasAgregadas: entradasConCaptura.length };
 }
 
 async function generarResumen(entradas, directorioSalida, fechaConsulta) {
@@ -631,6 +772,17 @@ async function main() {
     console.log(`\n✔ Resumen guardado en: ${rutaResumen}`);
   } catch (err) {
     console.error('No pude generar el resumen:', err.message);
+  }
+
+  try {
+    const { rutaPDF, paginasAgregadas } = await generarPDFCompleto(
+      entradas,
+      directorioSalida,
+      fechaConsulta,
+    );
+    console.log(`✔ PDF consolidado (${paginasAgregadas} capturas): ${rutaPDF}`);
+  } catch (err) {
+    console.error('No pude generar el PDF consolidado:', err.message);
   }
 }
 
