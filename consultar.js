@@ -250,7 +250,13 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
   )} de ${totalEncontradas} actuaciones`;
   await inyectarBannerTimestamp(page, leyenda).catch(() => {});
 
-  const sufijo = `${numero}_${timestampParaNombre(fin)}`;
+  const aliasSlug = (alias ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const prefijoAlias = aliasSlug ? `${aliasSlug}_` : '';
+  const sufijo = `${prefijoAlias}${numero}_${timestampParaNombre(fin)}`;
   const rutaScreenshot = path.join(directorioSalida, `captura_${sufijo}.png`);
   const rutaJson = path.join(directorioSalida, `actuaciones_${sufijo}.json`);
 

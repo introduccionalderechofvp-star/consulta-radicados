@@ -26,38 +26,61 @@ npx playwright install chromium
 
 ## Uso
 
-### Consultar el radicado de ejemplo (definido en `radicados.json`)
+### Opción A · Consultar varios radicados de `radicados.json`
+
+Edita `radicados.json` y agrega tantas entradas como quieras:
+
+```json
+{
+  "radicados": [
+    { "numero": "05266310300120130032400", "alias": "Ejecutivo Envigado" },
+    { "numero": "11001400308820210012300", "alias": "Familia Bogota" },
+    { "numero": "76001310500120240045600", "alias": "Laboral Cali" }
+  ]
+}
+```
+
+Reglas:
+
+- Cada bloque va entre llaves `{ }` y lleva `numero` (los 23 dígitos) y
+  `alias` (cualquier texto corto para identificarlo).
+- Los bloques se separan con coma. La última entrada NO lleva coma al final.
+- El alias se usa para nombrar los archivos de salida, así que conviene que
+  sea corto y descriptivo (ej. "Carpeta-Juan-Perez").
+
+Luego corres:
 
 ```bash
 npm run consultar
 ```
 
-### Consultar un radicado puntual por línea de comandos
+El script procesa los radicados uno por uno y al final muestra un resumen
+con el total de actuaciones encontradas para cada uno.
+
+### Opción B · Consultar un radicado puntual por línea de comandos
+
+Sin tocar `radicados.json`, útil para pruebas rápidas:
 
 ```bash
 node consultar.js 05266310300120130032400
 ```
 
-### Agregar varios radicados a la rotación
+## Archivos generados
 
-Edita `radicados.json`:
+Cada consulta deja dos archivos en `resultados/`, nombrados con el alias
+(normalizado), el radicado y la fecha/hora:
 
-```json
-{
-  "radicados": [
-    { "numero": "05266310300120130032400", "alias": "Proceso A" },
-    { "numero": "11001400308820210012300", "alias": "Proceso B" }
-  ]
-}
-```
+- `captura_<alias>_<radicado>_<fecha>.png` — captura compacta con banner de
+  fecha/hora y solo las 3 actuaciones más recientes visibles.
+- `actuaciones_<alias>_<radicado>_<fecha>.json` — datos estructurados con
+  las 3 actuaciones más recientes y el total detectado en el portal.
 
 ## Qué revisar tras correrlo
 
 1. Abre la carpeta `resultados/` y confirma que la captura muestra la tabla de
    actuaciones y el banner con la fecha/hora.
-2. Revisa el JSON: el campo `totalActuaciones` te dice cuántas filas se
-   extrajeron; si es 0, probablemente los selectores necesitan ajuste para la
-   estructura actual del portal.
+2. Revisa el JSON: el campo `totalActuacionesEnPortal` te dice cuántas filas
+   hay en total; `actuaciones` contiene las más recientes.
 3. Si hay error, el script guarda `resultados/error_<radicado>_<fecha>.png`
    para diagnosticar qué pantalla vio Playwright en el momento de la falla.
 
