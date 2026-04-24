@@ -61,19 +61,48 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
   const botonConsultar = page.getByRole('button', { name: /consultar/i }).first();
   await botonConsultar.click();
 
-  await page.waitForLoadState('networkidle', { timeout: TIMEOUT_CONSULTA }).catch(() => {});
+  // El portal es una SPA y tarda ~30 s en renderizar el detalle; networkidle
+  // se declara "idle" mucho antes de que los datos aparezcan en pantalla.
+  // Esperamos explícitamente a "DETALLE DEL PROCESO" o a una fila con el
+  // radicado (si hubiera varias coincidencias).
+  const esperaDetalle = page
+    .getByText(/DETALLE DEL PROCESO/i)
+    .first()
+    .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA });
+  const esperaFila = page
+    .locator('table tr')
+    .filter({ hasText: numero })
+    .first()
+    .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA });
 
-  // Hay dos escenarios: (1) aparece una fila con el proceso, debemos entrar al detalle;
-  // (2) el portal muestra directamente el detalle.
-  const filaProceso = page.locator('table tbody tr').first();
-  const tieneFila = await filaProceso.count();
-  if (tieneFila > 0) {
-    const enlaceDetalle = filaProceso.locator('a, button').first();
-    if ((await enlaceDetalle.count()) > 0) {
-      await enlaceDetalle.click().catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: TIMEOUT_CONSULTA }).catch(() => {});
+  await Promise.race([esperaDetalle, esperaFila]).catch(() => {});
+
+  // Si caímos en un listado intermedio, clickeamos la fila para entrar al detalle.
+  const detalleVisible = await page.getByText(/DETALLE DEL PROCESO/i).count();
+  if (detalleVisible === 0) {
+    const fila = page.locator('table tr').filter({ hasText: numero }).first();
+    if ((await fila.count()) > 0) {
+      const clicable = fila.locator('a, button').first();
+      if ((await clicable.count()) > 0) {
+        await clicable.click().catch(() => {});
+      } else {
+        await fila.click().catch(() => {});
+      }
+      await page
+        .getByText(/DETALLE DEL PROCESO/i)
+        .first()
+        .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA })
+        .catch(() => {});
     }
   }
+
+  // Antes de buscar la pestaña, asegurarnos de que el texto "ACTUACIONES"
+  // esté en el DOM (el renderizado del bloque de tabs es asíncrono también).
+  await page
+    .locator('xpath=//*[normalize-space(text())="ACTUACIONES"]')
+    .first()
+    .waitFor({ state: 'visible', timeout: 15_000 })
+    .catch(() => {});
 
   // Abrir la pestaña de Actuaciones. Usamos locators nativos de Playwright
   // (disparan eventos de mouse reales, a diferencia de element.click() en JS,
