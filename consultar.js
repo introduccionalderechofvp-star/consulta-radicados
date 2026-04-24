@@ -445,6 +445,47 @@ function fechaISOEnBogota(fecha) {
   return fecha.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 }
 
+// Extrae los radicados de un archivo Markdown. Toma cada bullet de lista
+// (`-`, `*`, `+`) que empiece por un número de 23 dígitos y opcionalmente
+// un alias detrás (separado por —, -, :, | o solo espacios). Cualquier
+// otra línea se ignora, así que el archivo puede tener encabezados,
+// notas, secciones, comentarios, líneas tachadas, etc.
+function parseRadicadosMd(contenido) {
+  const radicados = [];
+  let contador = 0;
+  for (const lineaRaw of contenido.split('\n')) {
+    const linea = lineaRaw.trim();
+    if (!/^[-*+]\s/.test(linea)) continue;
+    const sinBullet = linea.replace(/^[-*+]\s+/, '');
+    const m = sinBullet.match(/^(\d{23})(?:[\s—\-:|]+(.+?))?\s*$/);
+    if (!m) continue;
+    contador += 1;
+    const numero = m[1];
+    const alias = m[2]?.trim() || `Proc-${String(contador).padStart(3, '0')}`;
+    radicados.push({ numero, alias });
+  }
+  return radicados;
+}
+
+async function leerRadicados() {
+  if (existsSync('radicados.md')) {
+    const contenido = await readFile('radicados.md', 'utf8');
+    const lista = parseRadicadosMd(contenido);
+    if (lista.length === 0) {
+      throw new Error(
+        'radicados.md existe pero no encontré bullets con números de 23 dígitos. ' +
+          'Revisa el formato.',
+      );
+    }
+    return lista;
+  }
+  if (existsSync('radicados.json')) {
+    const config = JSON.parse(await readFile('radicados.json', 'utf8'));
+    return config.radicados;
+  }
+  throw new Error('No encontré radicados.md ni radicados.json en la carpeta.');
+}
+
 const DIAS_MOVIMIENTO_RECIENTE = 5;
 
 function clasificarEntrada(entrada, umbral) {
@@ -839,8 +880,8 @@ async function main() {
   if (argRadicado) {
     radicados = [{ numero: argRadicado, alias: 'CLI' }];
   } else {
-    const config = JSON.parse(await readFile('radicados.json', 'utf8'));
-    radicados = config.radicados;
+    radicados = await leerRadicados();
+    console.log(`Cargados ${radicados.length} radicados.`);
   }
 
   const browser = await chromium.launch({ headless: true });

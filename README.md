@@ -36,40 +36,35 @@ Si quieres tenerlo a la mano: click derecho sobre `consultar.bat` →
 Enviar a → Escritorio (crear acceso directo), y queda un ícono en el
 escritorio que puedes renombrar a gusto.
 
-### Opción B · Consultar varios radicados de `radicados.json`
+### Opción B · Editar `radicados.md` con tu lista de procesos
 
-Edita `radicados.json` y agrega tantas entradas como quieras:
+Abre `radicados.md` en cualquier editor (Bloc de Notas, VS Code, etc.) y
+agrega un bullet por cada radicado:
 
-```json
-{
-  "radicados": [
-    { "numero": "05266310300120130032400", "alias": "Ejecutivo Envigado" },
-    { "numero": "11001400308820210012300", "alias": "Familia Bogota" },
-    { "numero": "76001310500120240045600", "alias": "Laboral Cali" }
-  ]
-}
+```markdown
+## Mis procesos
+
+- 05266310300120130032400 — Ejecutivo Envigado
+- 11001400308820210012300 — Familia Bogotá
+- 76001310500120240045600 — Laboral Cali
 ```
 
 Reglas:
 
-- Cada bloque va entre llaves `{ }` y lleva `numero` (los 23 dígitos) y
-  `alias` (cualquier texto corto para identificarlo).
-- Los bloques se separan con coma. La última entrada NO lleva coma al final.
-- El alias se usa para nombrar los archivos de salida, así que conviene que
-  sea corto y descriptivo (ej. "Carpeta-Juan-Perez").
+- Cada línea con `- ` y un número de 23 dígitos al inicio se consulta.
+- Lo que va después del número (separado por espacio, `—`, `-`, `:` o `|`)
+  se usa como alias para nombrar los archivos.
+- Encabezados (`#`, `##`), notas, líneas en blanco y bullets sin números
+  válidos se ignoran — puedes documentar libremente el archivo.
+- Para **pausar** un radicado sin borrarlo, pon cualquier letra antes del
+  número, ej. `- (pausado) 05266…`.
+- Para **eliminarlo definitivamente**, borra la línea entera.
 
-Luego corres:
-
-```bash
-npm run consultar
-```
-
-El script procesa los radicados uno por uno y al final muestra un resumen
-con el total de actuaciones encontradas para cada uno.
+Luego ejecutas el script (doble click en `consultar.bat` o `npm run consultar`).
 
 ### Opción C · Consultar un radicado puntual por línea de comandos
 
-Sin tocar `radicados.json`, útil para pruebas rápidas:
+Sin tocar `radicados.md`, útil para pruebas rápidas:
 
 ```bash
 node consultar.js 05266310300120130032400
