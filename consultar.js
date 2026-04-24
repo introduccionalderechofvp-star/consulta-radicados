@@ -24,6 +24,14 @@ function timestampLegible(fecha) {
   });
 }
 
+function slugificar(texto) {
+  return (texto ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 async function inyectarBannerTimestamp(page, texto) {
   await page.evaluate((t) => {
     const id = '__banner_consulta__';
@@ -49,49 +57,44 @@ async function inyectarBannerTimestamp(page, texto) {
   }, texto);
 }
 
-async function consultarRadicado(page, numero, alias, directorioSalida) {
-  const inicio = new Date();
-  console.log(`\n[${alias ?? numero}] Consultando ${numero}…`);
-
+// Realiza la búsqueda (navega, marca "Todos los Procesos", escribe el radicado
+// y pulsa Consultar). Devuelve un string con el estado tras la consulta:
+// 'detalle'           → ya estamos en la vista de detalle de un único proceso
+// 'listado'           → hay una lista con al menos una fila que contiene el radicado
+// 'varios-registros'  → apareció el diálogo "Se han encontrado varios registros"
+//                        (ya se cerró con VOLVER antes de retornar)
+// Lanza error si el portal responde "La consulta no generó resultados".
+async function realizarBusqueda(page, numero) {
   await page.goto(URL_BASE, { waitUntil: 'domcontentloaded', timeout: TIMEOUT_NAV });
 
-  // Seleccionar "Todos los Procesos" (la opción por defecto "Actuaciones
-  // Recientes" sólo muestra procesos con movimiento en los últimos 30 días
-  // y devuelve error para los demás).
   const estrategiasRadioTodos = [
     () => page.getByRole('radio', { name: /Todos los Procesos/i }),
     () => page.locator('mat-radio-button').filter({ hasText: /Todos los Procesos/i }),
     () => page.locator('label').filter({ hasText: /Todos los Procesos/i }),
     () => page.getByText(/Todos los Procesos/i).first(),
   ];
-
-  let radioSeleccionado = false;
   for (const obtener of estrategiasRadioTodos) {
     const locator = obtener();
     if ((await locator.count()) === 0) continue;
     try {
       await locator.first().click({ timeout: 5000 });
-      radioSeleccionado = true;
       break;
     } catch {
-      // Probar siguiente.
+      /* probar siguiente */
     }
   }
-  if (!radioSeleccionado) {
-    console.warn('  ⚠ No pude seleccionar "Todos los Procesos"; continuo con la opción por defecto.');
-  }
 
-  const inputRadicado = page.locator('input#txtRadicacion, input[name="txtRadicacion"], input[placeholder*="Radicación" i], input[placeholder*="radicado" i]').first();
+  const inputRadicado = page
+    .locator(
+      'input#txtRadicacion, input[name="txtRadicacion"], input[placeholder*="Radicación" i], input[placeholder*="radicado" i]',
+    )
+    .first();
   await inputRadicado.waitFor({ state: 'visible', timeout: TIMEOUT_NAV });
   await inputRadicado.fill(numero);
 
   const botonConsultar = page.getByRole('button', { name: /consultar/i }).first();
   await botonConsultar.click();
 
-  // El portal es una SPA y tarda ~30 s en renderizar el detalle; networkidle
-  // se declara "idle" mucho antes de que los datos aparezcan en pantalla.
-  // Esperamos explícitamente a "DETALLE DEL PROCESO", a una fila (listado),
-  // o al diálogo de error ("La consulta no generó resultados").
   const esperaDetalle = page
     .getByText(/DETALLE DEL PROCESO/i)
     .first()
@@ -105,45 +108,81 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     .getByText(/La consulta no generó resultados/i)
     .first()
     .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA });
+  const esperaVariosRegistros = page
+    .getByText(/Se han encontrado varios registros/i)
+    .first()
+    .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA });
 
-  await Promise.race([esperaDetalle, esperaFila, esperaSinResultados]).catch(() => {});
+  await Promise.race([
+    esperaDetalle,
+    esperaFila,
+    esperaSinResultados,
+    esperaVariosRegistros,
+  ]).catch(() => {});
 
   if ((await page.getByText(/La consulta no generó resultados/i).count()) > 0) {
     throw new Error('El portal devolvió "La consulta no generó resultados".');
   }
 
-  // Si caímos en un listado intermedio, clickeamos la fila para entrar al detalle.
-  const detalleVisible = await page.getByText(/DETALLE DEL PROCESO/i).count();
-  if (detalleVisible === 0) {
-    const fila = page.locator('table tr').filter({ hasText: numero }).first();
-    if ((await fila.count()) > 0) {
-      const clicable = fila.locator('a, button').first();
-      if ((await clicable.count()) > 0) {
-        await clicable.click().catch(() => {});
-      } else {
-        await fila.click().catch(() => {});
-      }
+  const hayVariosRegistros =
+    (await page.getByText(/Se han encontrado varios registros/i).count()) > 0;
+
+  if (hayVariosRegistros) {
+    // Cerrar el diálogo para que quede visible la lista detrás.
+    const botonVolver = page.getByRole('button', { name: /^\s*volver\s*$/i }).first();
+    if ((await botonVolver.count()) > 0) {
+      await botonVolver.click({ timeout: 5000 }).catch(() => {});
+    } else {
       await page
-        .getByText(/DETALLE DEL PROCESO/i)
+        .locator('xpath=//*[normalize-space(text())="VOLVER"]')
         .first()
-        .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA })
+        .click({ timeout: 5000 })
         .catch(() => {});
     }
+    await page
+      .getByText(/Se han encontrado varios registros/i)
+      .first()
+      .waitFor({ state: 'hidden', timeout: 10_000 })
+      .catch(() => {});
+    return 'varios-registros';
   }
 
-  // Antes de buscar la pestaña, asegurarnos de que el texto "ACTUACIONES"
-  // esté en el DOM (el renderizado del bloque de tabs es asíncrono también).
+  if ((await page.getByText(/DETALLE DEL PROCESO/i).count()) > 0) {
+    return 'detalle';
+  }
+
+  if ((await page.locator('table tr').filter({ hasText: numero }).count()) > 0) {
+    return 'listado';
+  }
+
+  throw new Error('No logré interpretar el estado de la página tras la búsqueda.');
+}
+
+async function entrarAlDetalleDesdeFila(page, fila) {
+  const clicable = fila.locator('a, button').first();
+  if ((await clicable.count()) > 0) {
+    await clicable.click({ timeout: 10_000 }).catch(() => {});
+  } else {
+    await fila.click({ timeout: 10_000 }).catch(() => {});
+  }
+  await page
+    .getByText(/DETALLE DEL PROCESO/i)
+    .first()
+    .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA });
+}
+
+// Procesa la pestaña de Actuaciones del detalle actualmente visible:
+// clic en "ACTUACIONES", espera la tabla real, extrae filas, oculta las
+// antiguas, estampa banner, toma captura y guarda JSON.
+async function procesarDetalle(page, numero, aliasCompleto, directorioSalida) {
+  const inicio = new Date();
+
   await page
     .locator('xpath=//*[normalize-space(text())="ACTUACIONES"]')
     .first()
     .waitFor({ state: 'visible', timeout: 15_000 })
     .catch(() => {});
 
-  // Abrir la pestaña de Actuaciones. Usamos locators nativos de Playwright
-  // (disparan eventos de mouse reales, a diferencia de element.click() en JS,
-  // que Angular Material a veces ignora). Probamos de más específico a más
-  // genérico; el último recurso es un XPath que busca cualquier elemento
-  // cuyo texto propio (sin descendientes) sea exactamente "ACTUACIONES".
   const estrategiasTab = [
     () => page.locator('mat-tab-label').filter({ hasText: 'ACTUACIONES' }),
     () => page.locator('.mat-tab-label').filter({ hasText: 'ACTUACIONES' }),
@@ -161,10 +200,11 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     try {
       await locator.first().scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
       await locator.first().click({ timeout: 5000 });
-      estrategiaUsada = obtener.toString().match(/\('(.+?)'\)|locator\((.+?)\)/)?.[0] ?? 'desconocida';
+      estrategiaUsada =
+        obtener.toString().match(/\('(.+?)'\)|locator\((.+?)\)/)?.[0] ?? 'desconocida';
       break;
     } catch {
-      // Probar siguiente.
+      /* probar siguiente */
     }
   }
 
@@ -180,9 +220,6 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     console.log(`  ✔ Clic en Actuaciones con estrategia: ${estrategiaUsada}`);
   }
 
-  // Esperar a que la tabla termine de cargar. La fila inicial dice
-  // "Cargando... Por favor espere"; seguimos esperando hasta que aparezca
-  // al menos una fila que no sea ese placeholder.
   await page
     .waitForFunction(
       () => {
@@ -196,9 +233,7 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
             (tr) => tr.querySelectorAll('td').length > 0,
           );
           if (filasDatos.length === 0) return false;
-          const textoFilas = filasDatos
-            .map((tr) => tr.innerText.toLowerCase())
-            .join(' ');
+          const textoFilas = filasDatos.map((tr) => tr.innerText.toLowerCase()).join(' ');
           return !textoFilas.includes('cargando');
         });
       },
@@ -208,8 +243,6 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
 
   await page.waitForLoadState('networkidle', { timeout: TIMEOUT_CONSULTA }).catch(() => {});
 
-  // Extraer las filas de actuaciones. El portal no usa thead/tbody, así que
-  // tomamos los <th> y <tr><td> directamente del <table>.
   const actuaciones = await page.evaluate(() => {
     const tablas = Array.from(document.querySelectorAll('table'));
     const encabezadosVistos = tablas.map((t) =>
@@ -256,8 +289,6 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
   const totalEncontradas = actuaciones.filas.length;
   const actuacionesRecientes = actuaciones.filas.slice(0, LIMITE_ACTUACIONES);
 
-  // Ocultar en pantalla las filas más antiguas para que la captura salga
-  // compacta (banner + detalle + solo las N más recientes).
   await page.evaluate((limite) => {
     const tablas = Array.from(document.querySelectorAll('table'));
     const tabla = tablas.find((t) => {
@@ -275,8 +306,6 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     });
   }, LIMITE_ACTUACIONES);
 
-  const textoCompleto = await page.evaluate(() => document.body.innerText);
-
   const fin = new Date();
   const leyenda = `${numero} · ${timestampLegible(fin)} · Mostrando ${Math.min(
     LIMITE_ACTUACIONES,
@@ -284,11 +313,7 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
   )} de ${totalEncontradas} actuaciones`;
   await inyectarBannerTimestamp(page, leyenda).catch(() => {});
 
-  const aliasSlug = (alias ?? '')
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .replace(/[^a-zA-Z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+  const aliasSlug = slugificar(aliasCompleto);
   const prefijoAlias = aliasSlug ? `${aliasSlug}_` : '';
   const sufijo = `${prefijoAlias}${numero}_${timestampParaNombre(fin)}`;
   const rutaScreenshot = path.join(directorioSalida, `captura_${sufijo}.png`);
@@ -298,7 +323,7 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
 
   const resultado = {
     radicado: numero,
-    alias: alias ?? null,
+    alias: aliasCompleto ?? null,
     consultadoEn: fin.toISOString(),
     consultadoEnBogota: timestampLegible(fin),
     duracionMs: fin.getTime() - inicio.getTime(),
@@ -315,6 +340,54 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
   );
 
   return resultado;
+}
+
+async function consultarRadicado(page, numero, alias, directorioSalida) {
+  console.log(`\n[${alias ?? numero}] Consultando ${numero}…`);
+  const estado = await realizarBusqueda(page, numero);
+
+  if (estado === 'detalle') {
+    const r = await procesarDetalle(page, numero, alias ?? numero, directorioSalida);
+    return [r];
+  }
+
+  if (estado === 'listado') {
+    const fila = page.locator('table tr').filter({ hasText: numero }).first();
+    await entrarAlDetalleDesdeFila(page, fila);
+    const r = await procesarDetalle(page, numero, alias ?? numero, directorioSalida);
+    return [r];
+  }
+
+  // estado === 'varios-registros': hay N coincidencias en la lista.
+  const cantidad = await page.locator('table tr').filter({ hasText: numero }).count();
+  console.log(
+    `  ℹ Encontradas ${cantidad} coincidencias para este radicado; consultaré cada una.`,
+  );
+
+  const resultados = [];
+  for (let i = 0; i < cantidad; i += 1) {
+    const sufijoIdx = `-${String(i + 1).padStart(2, '0')}`;
+    const aliasCompleto = `${alias ?? numero}${sufijoIdx}`;
+
+    // Para la segunda y siguientes iteraciones re-hacemos la búsqueda desde
+    // cero para volver a un estado limpio del listado.
+    if (i > 0) {
+      await realizarBusqueda(page, numero);
+    }
+
+    const fila = page.locator('table tr').filter({ hasText: numero }).nth(i);
+    try {
+      await entrarAlDetalleDesdeFila(page, fila);
+      const r = await procesarDetalle(page, numero, aliasCompleto, directorioSalida);
+      resultados.push(r);
+    } catch (err) {
+      console.error(
+        `  ✘ Error procesando coincidencia ${i + 1}/${cantidad} (${aliasCompleto}): ${err.message}`,
+      );
+    }
+  }
+
+  return resultados;
 }
 
 async function main() {
@@ -343,8 +416,26 @@ async function main() {
   const resumen = [];
   for (const { numero, alias } of radicados) {
     try {
-      const r = await consultarRadicado(page, numero, alias, directorioSalida);
-      resumen.push({ numero, alias, ok: true, total: r.totalActuacionesEnPortal });
+      const resultados = await consultarRadicado(page, numero, alias, directorioSalida);
+      if (resultados.length === 0) {
+        resumen.push({ numero, alias, ok: false, error: 'No se pudo procesar ninguna coincidencia.' });
+      } else if (resultados.length === 1) {
+        resumen.push({
+          numero,
+          alias,
+          ok: true,
+          total: resultados[0].totalActuacionesEnPortal,
+        });
+      } else {
+        resultados.forEach((r, idx) => {
+          resumen.push({
+            numero,
+            alias: `${alias ?? ''}-${String(idx + 1).padStart(2, '0')}`,
+            ok: true,
+            total: r.totalActuacionesEnPortal,
+          });
+        });
+      }
     } catch (error) {
       console.error(`  ✘ Error con ${numero}:`, error.message);
       const rutaError = path.join(
