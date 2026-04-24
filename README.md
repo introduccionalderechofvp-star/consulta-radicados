@@ -26,7 +26,17 @@ npx playwright install chromium
 
 ## Uso
 
-### Opción A · Consultar varios radicados de `radicados.json`
+### Opción A · Doble click al `consultar.bat` (Windows)
+
+Es la forma más simple: haces doble click en `consultar.bat`, se abre una
+ventana de CMD, te muestra el progreso mientras corre y se queda abierta al
+final para que leas el resumen. La primera vez instala dependencias solo.
+
+Si quieres tenerlo a la mano: click derecho sobre `consultar.bat` →
+Enviar a → Escritorio (crear acceso directo), y queda un ícono en el
+escritorio que puedes renombrar a gusto.
+
+### Opción B · Consultar varios radicados de `radicados.json`
 
 Edita `radicados.json` y agrega tantas entradas como quieras:
 
@@ -57,7 +67,7 @@ npm run consultar
 El script procesa los radicados uno por uno y al final muestra un resumen
 con el total de actuaciones encontradas para cada uno.
 
-### Opción B · Consultar un radicado puntual por línea de comandos
+### Opción C · Consultar un radicado puntual por línea de comandos
 
 Sin tocar `radicados.json`, útil para pruebas rápidas:
 
