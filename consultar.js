@@ -507,30 +507,37 @@ async function generarPDFCompleto(entradas, directorioSalida, fechaConsulta) {
   }
 
   portada.drawText(
-    'Este documento consolida en un solo archivo las capturas de todas las',
+    'Orden: primero las capturas de procesos con movimiento en los',
+    { x: MARGEN, y: MARGEN + 44, size: 10, font: fuente, color: COLOR_GRIS },
+  );
+  portada.drawText(
+    `últimos ${DIAS_MOVIMIENTO_RECIENTE} días, luego sin movimiento, luego sin actuaciones.`,
     { x: MARGEN, y: MARGEN + 30, size: 10, font: fuente, color: COLOR_GRIS },
   );
   portada.drawText(
-    'consultas realizadas. Cada página muestra el radicado, el alias y el PNG',
+    'Cada página muestra alias, radicado y el PNG capturado.',
     { x: MARGEN, y: MARGEN + 16, size: 10, font: fuente, color: COLOR_GRIS },
   );
-  portada.drawText('generado por el script.', {
-    x: MARGEN,
-    y: MARGEN + 2,
-    size: 10,
-    font: fuente,
-    color: COLOR_GRIS,
-  });
 
-  // --- Una página por cada captura en el orden de las entradas ---
-  const entradasConCaptura = entradas.filter(
-    (e) => e.ok && e.resultado?.rutaScreenshot && existsSync(e.resultado.rutaScreenshot),
-  );
+  // --- Una página por cada captura; primero las de procesos con movimiento
+  // reciente para facilitar la revisión manual. Dentro de cada grupo se
+  // conserva el orden original de radicados.json (sort estable en Node).
+  const PRIORIDAD_TIPO = {
+    'con-movimiento': 0,
+    'sin-movimiento': 1,
+    'sin-actuaciones': 2,
+  };
+  const entradasConCaptura = entradas
+    .filter((e) => e.ok && e.resultado?.rutaScreenshot && existsSync(e.resultado.rutaScreenshot))
+    .map((e) => ({ entrada: e, clasif: clasificarEntrada(e, umbral) }))
+    .sort((a, b) => (PRIORIDAD_TIPO[a.clasif.tipo] ?? 9) - (PRIORIDAD_TIPO[b.clasif.tipo] ?? 9));
 
   for (let i = 0; i < entradasConCaptura.length; i += 1) {
-    const e = entradasConCaptura[i];
+    const { entrada: e, clasif } = entradasConCaptura[i];
     const etiqueta = aliasConSubindice(e.alias, e.subindice);
-    const cabecera = `${etiqueta}  ·  ${e.numero}`;
+    const marcaMovimiento =
+      clasif.tipo === 'con-movimiento' ? '  ·  movimiento reciente' : '';
+    const cabecera = `${etiqueta}  ·  ${e.numero}${marcaMovimiento}`;
 
     let pngBytes;
     try {
