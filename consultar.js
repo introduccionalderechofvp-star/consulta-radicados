@@ -485,12 +485,23 @@ async function generarPDFCompleto(entradas, directorioSalida, fechaConsulta) {
   const umbral = new Date(fechaConsulta);
   umbral.setDate(umbral.getDate() - DIAS_MOVIMIENTO_RECIENTE);
   const conteo = { conMovimiento: 0, sinMovimiento: 0, sinActuaciones: 0, fallas: 0 };
+  const listaConMovimiento = [];
+  const listaFallas = [];
   for (const e of entradas) {
     const clasif = clasificarEntrada(e, umbral);
-    if (clasif.tipo === 'falla') conteo.fallas += 1;
-    else if (clasif.tipo === 'sin-actuaciones') conteo.sinActuaciones += 1;
-    else if (clasif.tipo === 'con-movimiento') conteo.conMovimiento += 1;
-    else conteo.sinMovimiento += 1;
+    const etiqueta = aliasConSubindice(e.alias, e.subindice);
+    if (clasif.tipo === 'falla') {
+      conteo.fallas += 1;
+      const errBreve = (e.error ?? '').replace(/\s+/g, ' ').slice(0, 80);
+      listaFallas.push(`${etiqueta} · ${e.numero} — ${errBreve}`);
+    } else if (clasif.tipo === 'sin-actuaciones') {
+      conteo.sinActuaciones += 1;
+    } else if (clasif.tipo === 'con-movimiento') {
+      conteo.conMovimiento += 1;
+      listaConMovimiento.push(`${etiqueta} · ${e.numero}`);
+    } else {
+      conteo.sinMovimiento += 1;
+    }
   }
 
   const lineasResumen = [
@@ -505,19 +516,62 @@ async function generarPDFCompleto(entradas, directorioSalida, fechaConsulta) {
     portada.drawText(linea, { x: MARGEN, y, size: 12, font: fuente, color: COLOR_TEXTO });
     y -= 18;
   }
+  y -= 10;
 
-  portada.drawText(
-    'Orden: primero las capturas de procesos con movimiento en los',
-    { x: MARGEN, y: MARGEN + 44, size: 10, font: fuente, color: COLOR_GRIS },
+  // Listas detalladas: radicados con movimiento y radicados con error. Si se
+  // extienden más allá de la portada, continúan en páginas adicionales.
+  let paginaActual = portada;
+  const asegurarEspacio = (altura) => {
+    if (y - altura < MARGEN) {
+      paginaActual = pdf.addPage([ANCHO, ALTO]);
+      y = ALTO - MARGEN;
+    }
+  };
+
+  const dibujarSeccion = (titulo, items) => {
+    if (items.length === 0) return;
+    asegurarEspacio(26);
+    paginaActual.drawText(titulo, {
+      x: MARGEN,
+      y,
+      size: 13,
+      font: fuenteBold,
+      color: COLOR_TEXTO,
+    });
+    y -= 18;
+    for (const item of items) {
+      asegurarEspacio(13);
+      const recortado = item.length > 100 ? `${item.slice(0, 97)}…` : item;
+      paginaActual.drawText(`• ${recortado}`, {
+        x: MARGEN,
+        y,
+        size: 10,
+        font: fuente,
+        color: COLOR_TEXTO,
+      });
+      y -= 13;
+    }
+    y -= 10;
+  };
+
+  dibujarSeccion(
+    `Con movimiento reciente (${listaConMovimiento.length})`,
+    listaConMovimiento,
   );
-  portada.drawText(
-    `últimos ${DIAS_MOVIMIENTO_RECIENTE} días, luego sin movimiento, luego sin actuaciones.`,
-    { x: MARGEN, y: MARGEN + 30, size: 10, font: fuente, color: COLOR_GRIS },
-  );
-  portada.drawText(
-    'Cada página muestra alias, radicado y el PNG capturado.',
-    { x: MARGEN, y: MARGEN + 16, size: 10, font: fuente, color: COLOR_GRIS },
-  );
+  dibujarSeccion(`Fallas (${listaFallas.length})`, listaFallas);
+
+  // Nota de ordenamiento al pie, si todavía queda espacio en la página donde
+  // terminamos; si no, la omitimos para no añadir una página casi vacía.
+  if (y > MARGEN + 60) {
+    paginaActual.drawText(
+      'Orden de las capturas: primero los procesos con movimiento reciente, luego',
+      { x: MARGEN, y: MARGEN + 30, size: 10, font: fuente, color: COLOR_GRIS },
+    );
+    paginaActual.drawText(
+      'sin movimiento, luego sin actuaciones. Cada página muestra alias, radicado y PNG.',
+      { x: MARGEN, y: MARGEN + 16, size: 10, font: fuente, color: COLOR_GRIS },
+    );
+  }
 
   // --- Una página por cada captura; primero las de procesos con movimiento
   // reciente para facilitar la revisión manual. Dentro de cada grupo se
