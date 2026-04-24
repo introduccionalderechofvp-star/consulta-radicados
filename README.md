@@ -67,13 +67,17 @@ node consultar.js 05266310300120130032400
 
 ## Archivos generados
 
-Cada consulta deja dos archivos en `resultados/`, nombrados con el alias
-(normalizado), el radicado y la fecha/hora:
+Cada corrida crea (si no existe) una subcarpeta `resultados/YYYY-MM-DD/`
+con la fecha de la consulta en hora de Bogotá, y dentro deja:
 
-- `captura_<alias>_<radicado>_<fecha>.png` — captura compacta con banner de
-  fecha/hora y solo las 3 actuaciones más recientes visibles.
+- `captura_<alias>_<radicado>_<fecha>.png` — captura compacta con banner
+  de fecha/hora y solo las 3 actuaciones más recientes visibles.
 - `actuaciones_<alias>_<radicado>_<fecha>.json` — datos estructurados con
   las 3 actuaciones más recientes y el total detectado en el portal.
+- `resumen_<fecha>.md` — informe en Markdown con tres secciones:
+  procesos con movimiento en los últimos 5 días (y el detalle de cada
+  actuación nueva), procesos sin movimiento reciente (fecha de la última
+  actuación), y fallas. Se genera al final de cada corrida.
 
 ## Qué revisar tras correrlo
 

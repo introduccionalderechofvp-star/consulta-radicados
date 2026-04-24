@@ -417,6 +417,125 @@ function aliasConSubindice(alias, subindice) {
   return `${alias ?? ''}-${pad}`;
 }
 
+function parseFechaISO(valor) {
+  if (!valor || typeof valor !== 'string') return null;
+  const m = valor.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const d = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function fechaISOEnBogota(fecha) {
+  // toLocaleDateString('en-CA') da el formato YYYY-MM-DD.
+  return fecha.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+}
+
+const DIAS_MOVIMIENTO_RECIENTE = 5;
+
+function clasificarEntrada(entrada, umbral) {
+  if (!entrada.ok) return { tipo: 'falla' };
+  const actuaciones = entrada.resultado.actuaciones ?? [];
+  if (actuaciones.length === 0) {
+    return { tipo: 'sin-actuaciones' };
+  }
+  const recientes = actuaciones.filter((a) => {
+    const fecha = parseFechaISO(a['Fecha de Registro'] ?? a['Fecha de Actuación']);
+    return fecha && fecha >= umbral;
+  });
+  if (recientes.length > 0) {
+    return { tipo: 'con-movimiento', recientes };
+  }
+  const ultima = actuaciones[0];
+  const fechaUltima = ultima['Fecha de Registro'] ?? ultima['Fecha de Actuación'] ?? '?';
+  return { tipo: 'sin-movimiento', fechaUltima };
+}
+
+async function generarResumen(entradas, directorioSalida, fechaConsulta) {
+  const umbral = new Date(fechaConsulta);
+  umbral.setDate(umbral.getDate() - DIAS_MOVIMIENTO_RECIENTE);
+
+  const conMovimiento = [];
+  const sinMovimiento = [];
+  const sinActuaciones = [];
+  const fallas = [];
+
+  for (const e of entradas) {
+    const clasif = clasificarEntrada(e, umbral);
+    if (clasif.tipo === 'falla') fallas.push(e);
+    else if (clasif.tipo === 'sin-actuaciones') sinActuaciones.push(e);
+    else if (clasif.tipo === 'con-movimiento') conMovimiento.push({ ...e, recientes: clasif.recientes });
+    else sinMovimiento.push({ ...e, fechaUltima: clasif.fechaUltima });
+  }
+
+  const fechaStr = fechaISOEnBogota(fechaConsulta);
+  const lineas = [];
+  lineas.push(`# Consulta de radicados · ${fechaStr}`);
+  lineas.push('');
+  lineas.push(`- Total de entradas procesadas: **${entradas.length}**`);
+  lineas.push(`- Con movimiento en los últimos ${DIAS_MOVIMIENTO_RECIENTE} días: **${conMovimiento.length}**`);
+  lineas.push(`- Sin movimiento reciente: **${sinMovimiento.length}**`);
+  if (sinActuaciones.length > 0) {
+    lineas.push(`- Sin actuaciones registradas: **${sinActuaciones.length}**`);
+  }
+  lineas.push(`- Fallas: **${fallas.length}**`);
+  lineas.push('');
+
+  if (conMovimiento.length > 0) {
+    lineas.push(`## Con movimiento en los últimos ${DIAS_MOVIMIENTO_RECIENTE} días (${conMovimiento.length})`);
+    lineas.push('');
+    for (const e of conMovimiento) {
+      const etiqueta = aliasConSubindice(e.alias, e.subindice);
+      lineas.push(`### ${etiqueta} — ${e.numero}`);
+      for (const a of e.recientes) {
+        const fecha = a['Fecha de Registro'] ?? a['Fecha de Actuación'] ?? '?';
+        const tipo = a['Actuación'] ?? '';
+        const nota = a['Anotación'] ?? '';
+        const piezas = [`**${fecha}**`, tipo, nota].filter((x) => x && x.length > 0);
+        lineas.push(`- ${piezas.join(' · ')}`);
+      }
+      lineas.push('');
+    }
+  }
+
+  if (sinMovimiento.length > 0) {
+    lineas.push(`## Sin movimiento reciente (${sinMovimiento.length})`);
+    lineas.push('');
+    for (const e of sinMovimiento) {
+      const etiqueta = aliasConSubindice(e.alias, e.subindice);
+      lineas.push(`- ${etiqueta} — ${e.numero} — última: ${e.fechaUltima}`);
+    }
+    lineas.push('');
+  }
+
+  if (sinActuaciones.length > 0) {
+    lineas.push(`## Sin actuaciones registradas (${sinActuaciones.length})`);
+    lineas.push('');
+    for (const e of sinActuaciones) {
+      const etiqueta = aliasConSubindice(e.alias, e.subindice);
+      lineas.push(`- ${etiqueta} — ${e.numero}`);
+    }
+    lineas.push('');
+  }
+
+  if (fallas.length > 0) {
+    lineas.push(`## Fallas (${fallas.length})`);
+    lineas.push('');
+    for (const e of fallas) {
+      const etiqueta = aliasConSubindice(e.alias, e.subindice);
+      const marca = e.reintentado ? ' [reintento]' : '';
+      lineas.push(`- ${etiqueta} — ${e.numero}: ${e.error}${marca}`);
+    }
+    lineas.push('');
+  }
+
+  const rutaResumen = path.join(
+    directorioSalida,
+    `resumen_${timestampParaNombre(fechaConsulta)}.md`,
+  );
+  await writeFile(rutaResumen, lineas.join('\n'), 'utf8');
+  return rutaResumen;
+}
+
 async function procesarRadicado(page, { numero, alias }, directorioSalida) {
   try {
     return await consultarRadicado(page, numero, alias, directorioSalida);
@@ -433,7 +552,8 @@ async function procesarRadicado(page, { numero, alias }, directorioSalida) {
 
 async function main() {
   const argRadicado = process.argv[2];
-  const directorioSalida = path.resolve('resultados');
+  const fechaConsulta = new Date();
+  const directorioSalida = path.resolve('resultados', fechaISOEnBogota(fechaConsulta));
   if (!existsSync(directorioSalida)) {
     await mkdir(directorioSalida, { recursive: true });
   }
@@ -505,6 +625,13 @@ async function main() {
     }
   }
   console.log(`\nTotal: ${okCount} OK, ${fallaCount} fallas.`);
+
+  try {
+    const rutaResumen = await generarResumen(entradas, directorioSalida, fechaConsulta);
+    console.log(`\n✔ Resumen guardado en: ${rutaResumen}`);
+  } catch (err) {
+    console.error('No pude generar el resumen:', err.message);
+  }
 }
 
 main().catch((err) => {
