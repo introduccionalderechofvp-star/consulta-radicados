@@ -145,9 +145,9 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     console.log(`  ✔ Clic en Actuaciones con estrategia: ${estrategiaUsada}`);
   }
 
-  // Esperar a que aparezca la tabla con filas (tras el tab-switch el render
-  // es asíncrono). Muchas tablas del portal no usan thead/tbody, así que
-  // buscamos <th> y <tr><td> directamente.
+  // Esperar a que la tabla termine de cargar. La fila inicial dice
+  // "Cargando... Por favor espere"; seguimos esperando hasta que aparezca
+  // al menos una fila que no sea ese placeholder.
   await page
     .waitForFunction(
       () => {
@@ -156,11 +156,18 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
           const textoTh = Array.from(t.querySelectorAll('th'))
             .map((th) => th.innerText.toLowerCase())
             .join(' ');
-          const tieneFilas = t.querySelectorAll('tr').length > 1;
-          return textoTh.includes('actuaci') && tieneFilas;
+          if (!textoTh.includes('actuaci')) return false;
+          const filasDatos = Array.from(t.querySelectorAll('tr')).filter(
+            (tr) => tr.querySelectorAll('td').length > 0,
+          );
+          if (filasDatos.length === 0) return false;
+          const textoFilas = filasDatos
+            .map((tr) => tr.innerText.toLowerCase())
+            .join(' ');
+          return !textoFilas.includes('cargando');
         });
       },
-      { timeout: 20_000 },
+      { timeout: 45_000 },
     )
     .catch(() => {});
 
@@ -190,6 +197,7 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     const filas = Array.from(tablaActuaciones.querySelectorAll('tr'))
       .map((fila) => Array.from(fila.querySelectorAll('td')).map((td) => td.innerText.trim()))
       .filter((celdas) => celdas.length > 0)
+      .filter((celdas) => !celdas.join(' ').toLowerCase().includes('cargando'))
       .map((celdas) => {
         const registro = {};
         celdas.forEach((valor, idx) => {
