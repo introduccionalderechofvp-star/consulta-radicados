@@ -55,6 +55,32 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
 
   await page.goto(URL_BASE, { waitUntil: 'domcontentloaded', timeout: TIMEOUT_NAV });
 
+  // Seleccionar "Todos los Procesos" (la opción por defecto "Actuaciones
+  // Recientes" sólo muestra procesos con movimiento en los últimos 30 días
+  // y devuelve error para los demás).
+  const estrategiasRadioTodos = [
+    () => page.getByRole('radio', { name: /Todos los Procesos/i }),
+    () => page.locator('mat-radio-button').filter({ hasText: /Todos los Procesos/i }),
+    () => page.locator('label').filter({ hasText: /Todos los Procesos/i }),
+    () => page.getByText(/Todos los Procesos/i).first(),
+  ];
+
+  let radioSeleccionado = false;
+  for (const obtener of estrategiasRadioTodos) {
+    const locator = obtener();
+    if ((await locator.count()) === 0) continue;
+    try {
+      await locator.first().click({ timeout: 5000 });
+      radioSeleccionado = true;
+      break;
+    } catch {
+      // Probar siguiente.
+    }
+  }
+  if (!radioSeleccionado) {
+    console.warn('  ⚠ No pude seleccionar "Todos los Procesos"; continuo con la opción por defecto.');
+  }
+
   const inputRadicado = page.locator('input#txtRadicacion, input[name="txtRadicacion"], input[placeholder*="Radicación" i], input[placeholder*="radicado" i]').first();
   await inputRadicado.waitFor({ state: 'visible', timeout: TIMEOUT_NAV });
   await inputRadicado.fill(numero);
@@ -64,8 +90,8 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
 
   // El portal es una SPA y tarda ~30 s en renderizar el detalle; networkidle
   // se declara "idle" mucho antes de que los datos aparezcan en pantalla.
-  // Esperamos explícitamente a "DETALLE DEL PROCESO" o a una fila con el
-  // radicado (si hubiera varias coincidencias).
+  // Esperamos explícitamente a "DETALLE DEL PROCESO", a una fila (listado),
+  // o al diálogo de error ("La consulta no generó resultados").
   const esperaDetalle = page
     .getByText(/DETALLE DEL PROCESO/i)
     .first()
@@ -75,8 +101,16 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     .filter({ hasText: numero })
     .first()
     .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA });
+  const esperaSinResultados = page
+    .getByText(/La consulta no generó resultados/i)
+    .first()
+    .waitFor({ state: 'visible', timeout: TIMEOUT_CONSULTA });
 
-  await Promise.race([esperaDetalle, esperaFila]).catch(() => {});
+  await Promise.race([esperaDetalle, esperaFila, esperaSinResultados]).catch(() => {});
+
+  if ((await page.getByText(/La consulta no generó resultados/i).count()) > 0) {
+    throw new Error('El portal devolvió "La consulta no generó resultados".');
+  }
 
   // Si caímos en un listado intermedio, clickeamos la fila para entrar al detalle.
   const detalleVisible = await page.getByText(/DETALLE DEL PROCESO/i).count();
