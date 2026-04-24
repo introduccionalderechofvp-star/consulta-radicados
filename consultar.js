@@ -6,6 +6,7 @@ import path from 'node:path';
 const URL_BASE = 'https://consultaprocesos.ramajudicial.gov.co/Procesos/NumeroRadicacion';
 const TIMEOUT_NAV = 60_000;
 const TIMEOUT_CONSULTA = 90_000;
+const LIMITE_ACTUACIONES = 3;
 
 function timestampParaNombre(fecha) {
   const p = (n) => String(n).padStart(2, '0');
@@ -202,6 +203,7 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
         const registro = {};
         celdas.forEach((valor, idx) => {
           const clave = columnas[idx] || `col_${idx}`;
+          if (clave.startsWith('col_') && valor === '') return;
           registro[clave] = valor;
         });
         return registro;
@@ -217,10 +219,35 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     );
   }
 
+  const totalEncontradas = actuaciones.filas.length;
+  const actuacionesRecientes = actuaciones.filas.slice(0, LIMITE_ACTUACIONES);
+
+  // Ocultar en pantalla las filas más antiguas para que la captura salga
+  // compacta (banner + detalle + solo las N más recientes).
+  await page.evaluate((limite) => {
+    const tablas = Array.from(document.querySelectorAll('table'));
+    const tabla = tablas.find((t) => {
+      const textoTh = Array.from(t.querySelectorAll('th'))
+        .map((th) => th.innerText.toLowerCase())
+        .join(' ');
+      return textoTh.includes('actuaci');
+    });
+    if (!tabla) return;
+    const filasDatos = Array.from(tabla.querySelectorAll('tr')).filter(
+      (tr) => tr.querySelectorAll('td').length > 0,
+    );
+    filasDatos.slice(limite).forEach((tr) => {
+      tr.style.display = 'none';
+    });
+  }, LIMITE_ACTUACIONES);
+
   const textoCompleto = await page.evaluate(() => document.body.innerText);
 
   const fin = new Date();
-  const leyenda = `${numero} · ${timestampLegible(fin)}`;
+  const leyenda = `${numero} · ${timestampLegible(fin)} · Mostrando ${Math.min(
+    LIMITE_ACTUACIONES,
+    totalEncontradas,
+  )} de ${totalEncontradas} actuaciones`;
   await inyectarBannerTimestamp(page, leyenda).catch(() => {});
 
   const sufijo = `${numero}_${timestampParaNombre(fin)}`;
@@ -236,15 +263,16 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     consultadoEnBogota: timestampLegible(fin),
     duracionMs: fin.getTime() - inicio.getTime(),
     url: page.url(),
-    totalActuaciones: actuaciones.filas.length,
-    actuaciones: actuaciones.filas,
-    encabezadosDetectados: actuaciones.encabezadosDisponibles,
-    textoPaginaPreview: textoCompleto.slice(0, 2000),
+    totalActuacionesEnPortal: totalEncontradas,
+    actuacionesDevueltas: actuacionesRecientes.length,
+    actuaciones: actuacionesRecientes,
   };
 
   await writeFile(rutaJson, JSON.stringify(resultado, null, 2), 'utf8');
   console.log(`  ✔ Captura:     ${rutaScreenshot}`);
-  console.log(`  ✔ Actuaciones: ${actuaciones.filas.length} (JSON: ${rutaJson})`);
+  console.log(
+    `  ✔ Actuaciones: ${actuacionesRecientes.length} más recientes de ${totalEncontradas} (JSON: ${rutaJson})`,
+  );
 
   return resultado;
 }
@@ -276,7 +304,7 @@ async function main() {
   for (const { numero, alias } of radicados) {
     try {
       const r = await consultarRadicado(page, numero, alias, directorioSalida);
-      resumen.push({ numero, alias, ok: true, total: r.totalActuaciones });
+      resumen.push({ numero, alias, ok: true, total: r.totalActuacionesEnPortal });
     } catch (error) {
       console.error(`  ✘ Error con ${numero}:`, error.message);
       const rutaError = path.join(
