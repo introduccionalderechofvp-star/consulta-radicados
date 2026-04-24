@@ -78,6 +78,9 @@ con la fecha de la consulta en hora de Bogotá, y dentro deja:
   procesos con movimiento en los últimos 5 días (y el detalle de cada
   actuación nueva), procesos sin movimiento reciente (fecha de la última
   actuación), y fallas. Se genera al final de cada corrida.
+- `consolidado_<fecha>.pdf` — PDF consolidado con portada (fecha y
+  estadísticas globales) y una página por cada captura, para hojear
+  manualmente todas las consultas en un solo documento.
 
 ## Qué revisar tras correrlo
 
