@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
@@ -31,6 +31,19 @@ function slugificar(texto) {
     .replace(/\p{M}/gu, '')
     .replace(/[^a-zA-Z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+// pdf-lib + fuentes estándar (Helvetica) usan WinAnsi y no pueden codificar
+// caracteres de control (códigos ANSI de color, escape sequences) ni varios
+// glifos Unicode. Limpiamos el texto antes de pasárselo a drawText.
+function sanitizarParaPDF(texto) {
+  return (texto ?? '')
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') // secuencias ANSI completas
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '') // demás controles (preservamos \t y \n)
+    .replace(/\r\n|\r/g, '\n')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/…/g, '...');
 }
 
 async function inyectarBannerTimestamp(page, texto) {
@@ -492,13 +505,13 @@ async function generarPDFCompleto(entradas, directorioSalida, fechaConsulta) {
     const etiqueta = aliasConSubindice(e.alias, e.subindice);
     if (clasif.tipo === 'falla') {
       conteo.fallas += 1;
-      const errBreve = (e.error ?? '').replace(/\s+/g, ' ').slice(0, 80);
-      listaFallas.push(`${etiqueta} · ${e.numero} — ${errBreve}`);
+      const errBreve = sanitizarParaPDF(e.error ?? '').replace(/\s+/g, ' ').slice(0, 80);
+      listaFallas.push(sanitizarParaPDF(`${etiqueta} · ${e.numero} — ${errBreve}`));
     } else if (clasif.tipo === 'sin-actuaciones') {
       conteo.sinActuaciones += 1;
     } else if (clasif.tipo === 'con-movimiento') {
       conteo.conMovimiento += 1;
-      listaConMovimiento.push(`${etiqueta} · ${e.numero}`);
+      listaConMovimiento.push(sanitizarParaPDF(`${etiqueta} · ${e.numero}`));
     } else {
       conteo.sinMovimiento += 1;
     }
@@ -591,7 +604,7 @@ async function generarPDFCompleto(entradas, directorioSalida, fechaConsulta) {
     const etiqueta = aliasConSubindice(e.alias, e.subindice);
     const marcaMovimiento =
       clasif.tipo === 'con-movimiento' ? '  ·  movimiento reciente' : '';
-    const cabecera = `${etiqueta}  ·  ${e.numero}${marcaMovimiento}`;
+    const cabecera = sanitizarParaPDF(`${etiqueta}  ·  ${e.numero}${marcaMovimiento}`);
 
     let pngBytes;
     try {
@@ -752,8 +765,70 @@ async function procesarRadicado(page, { numero, alias }, directorioSalida) {
   }
 }
 
+// Reconstruye el PDF a partir de los JSONs y PNGs ya guardados en una
+// carpeta de resultados, sin tener que repetir la corrida completa contra
+// el portal. Útil cuando la corrida termina pero el paso del PDF falla.
+async function regenerarPDFDesdeDirectorio(directorio) {
+  const archivos = await readdir(directorio);
+  const jsons = archivos
+    .filter((f) => f.startsWith('actuaciones_') && f.endsWith('.json'))
+    .sort();
+  if (jsons.length === 0) {
+    throw new Error(`No encontré archivos actuaciones_*.json en ${directorio}`);
+  }
+  console.log(`Reconstruyendo PDF desde ${jsons.length} JSONs en ${directorio}…`);
+
+  const entradas = [];
+  for (const archivo of jsons) {
+    try {
+      const ruta = path.join(directorio, archivo);
+      const datos = JSON.parse(await readFile(ruta, 'utf8'));
+      // Reescribimos rutaScreenshot por si la carpeta cambió de ubicación
+      // (la guardada en JSON era absoluta al momento de la corrida).
+      const nombrePng = path.basename(datos.rutaScreenshot ?? '').trim();
+      const rutaScreenshotLocal = nombrePng
+        ? path.join(directorio, nombrePng)
+        : datos.rutaScreenshot;
+      entradas.push({
+        ok: true,
+        subindice: null, // el alias en JSON ya trae el sufijo -NN si aplica
+        numero: datos.radicado,
+        alias: datos.alias,
+        resultado: { ...datos, rutaScreenshot: rutaScreenshotLocal },
+      });
+    } catch (err) {
+      console.warn(`  ⚠ No pude leer ${archivo}: ${err.message}`);
+    }
+  }
+
+  // La fecha del PDF: si todas las entradas tienen consultadoEn, usamos la
+  // primera; si no, hoy.
+  const fechaConsulta =
+    entradas[0]?.resultado?.consultadoEn != null
+      ? new Date(entradas[0].resultado.consultadoEn)
+      : new Date();
+  const { rutaPDF, paginasAgregadas } = await generarPDFCompleto(
+    entradas,
+    directorio,
+    fechaConsulta,
+  );
+  console.log(`✔ PDF (${paginasAgregadas} capturas): ${rutaPDF}`);
+}
+
 async function main() {
-  const argRadicado = process.argv[2];
+  const args = process.argv.slice(2);
+
+  // Modo: regenerar solo el PDF a partir de archivos ya guardados.
+  if (args[0] === '--solo-pdf') {
+    const dirArg = args[1];
+    const directorio = dirArg
+      ? path.resolve(dirArg)
+      : path.resolve('resultados', fechaISOEnBogota(new Date()));
+    await regenerarPDFDesdeDirectorio(directorio);
+    return;
+  }
+
+  const argRadicado = args[0];
   const fechaConsulta = new Date();
   const directorioSalida = path.resolve('resultados', fechaISOEnBogota(fechaConsulta));
   if (!existsSync(directorioSalida)) {
