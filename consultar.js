@@ -75,80 +75,98 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     }
   }
 
-  // Abrir la pestaña de Actuaciones. El portal usa un tab custom sin role="tab",
-  // así que buscamos por texto visible y vamos probando hasta que funcione.
-  const estrategiasActuaciones = [
-    () => page.getByRole('tab', { name: /actuaciones/i }).first(),
-    () => page.locator('a, button, li, div, span').filter({ hasText: /^\s*ACTUACIONES\s*$/ }).first(),
-    () => page.getByText('ACTUACIONES', { exact: true }).first(),
-    () => page.getByText(/actuaciones/i).first(),
-  ];
-
-  let clickExitoso = false;
-  for (const obtener of estrategiasActuaciones) {
-    const locator = obtener();
-    if ((await locator.count()) === 0) continue;
-    try {
-      await locator.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
-      await locator.click({ timeout: 5000 });
-      clickExitoso = true;
-      break;
-    } catch {
-      // Probar la siguiente estrategia.
+  // Abrir la pestaña de Actuaciones. El portal usa Angular Material, así que
+  // probamos selectores específicos de esa librería. Si todo falla, hacemos
+  // el clic desde JS buscando el nodo con texto exacto "ACTUACIONES".
+  const clickActuaciones = await page.evaluate(() => {
+    const normalizar = (t) => (t ?? '').replace(/\s+/g, ' ').trim().toUpperCase();
+    const candidatos = Array.from(
+      document.querySelectorAll(
+        'mat-tab-label, .mat-tab-label, .mat-mdc-tab, .mdc-tab, [role="tab"], ' +
+          'a, button, li, div, span',
+      ),
+    );
+    const exacto = candidatos.find((el) => normalizar(el.textContent) === 'ACTUACIONES');
+    if (!exacto) return { ok: false, motivo: 'no-encontrado' };
+    // Subir al ancestro clicable más cercano (mat-tab-label, button, a, li).
+    let objetivo = exacto;
+    for (let i = 0; i < 6 && objetivo.parentElement; i += 1) {
+      const etiqueta = objetivo.tagName.toLowerCase();
+      if (
+        etiqueta === 'button' ||
+        etiqueta === 'a' ||
+        etiqueta === 'li' ||
+        objetivo.getAttribute('role') === 'tab' ||
+        objetivo.classList.contains('mat-tab-label') ||
+        objetivo.classList.contains('mat-mdc-tab') ||
+        objetivo.classList.contains('mdc-tab')
+      ) {
+        break;
+      }
+      objetivo = objetivo.parentElement;
     }
+    objetivo.scrollIntoView({ block: 'center' });
+    objetivo.click();
+    return { ok: true, etiqueta: objetivo.tagName, clase: objetivo.className };
+  });
+
+  if (!clickActuaciones.ok) {
+    console.warn(`  ⚠ No encontré la pestaña Actuaciones (${clickActuaciones.motivo}).`);
   }
 
-  if (!clickExitoso) {
-    console.warn('  ⚠ No pude hacer clic en la pestaña Actuaciones; continúo de todos modos.');
-  }
-
-  // Esperar a que aparezca la tabla de actuaciones (el contenido renderiza
-  // asíncrono tras el clic). Damos varios segundos máximo.
+  // Esperar a que aparezca la tabla con filas (tras el tab-switch el render
+  // es asíncrono). Muchas tablas del portal no usan thead/tbody, así que
+  // buscamos <th> y <tr><td> directamente.
   await page
     .waitForFunction(
       () => {
         const tablas = Array.from(document.querySelectorAll('table'));
         return tablas.some((t) => {
-          const encabezado = t.querySelector('thead')?.innerText?.toLowerCase() ?? '';
-          return (
-            encabezado.includes('actuaci') &&
-            (t.querySelectorAll('tbody tr').length > 0)
-          );
+          const textoTh = Array.from(t.querySelectorAll('th'))
+            .map((th) => th.innerText.toLowerCase())
+            .join(' ');
+          const tieneFilas = t.querySelectorAll('tr').length > 1;
+          return textoTh.includes('actuaci') && tieneFilas;
         });
       },
-      { timeout: 15_000 },
+      { timeout: 20_000 },
     )
     .catch(() => {});
 
   await page.waitForLoadState('networkidle', { timeout: TIMEOUT_CONSULTA }).catch(() => {});
 
-  // Extraer las filas de actuaciones. Buscamos la tabla cuyo encabezado
-  // mencione "actuaci" (cubre "Actuación", "Actuaciones"). Si no la
-  // encontramos, devolvemos los encabezados disponibles para diagnóstico.
+  // Extraer las filas de actuaciones. El portal no usa thead/tbody, así que
+  // tomamos los <th> y <tr><td> directamente del <table>.
   const actuaciones = await page.evaluate(() => {
     const tablas = Array.from(document.querySelectorAll('table'));
-    const encabezadosVistos = tablas.map(
-      (t) => t.querySelector('thead')?.innerText?.trim() ?? '(sin thead)',
+    const encabezadosVistos = tablas.map((t) =>
+      Array.from(t.querySelectorAll('th'))
+        .map((th) => th.innerText.trim())
+        .join(' | '),
     );
     const tablaActuaciones = tablas.find((t) => {
-      const encabezado = t.querySelector('thead')?.innerText?.toLowerCase() ?? '';
-      return encabezado.includes('actuaci');
+      const textoTh = Array.from(t.querySelectorAll('th'))
+        .map((th) => th.innerText.toLowerCase())
+        .join(' ');
+      return textoTh.includes('actuaci');
     });
     if (!tablaActuaciones) {
       return { filas: [], encabezadosDisponibles: encabezadosVistos };
     }
-    const columnas = Array.from(tablaActuaciones.querySelectorAll('thead th')).map((th) =>
+    const columnas = Array.from(tablaActuaciones.querySelectorAll('th')).map((th) =>
       th.innerText.trim(),
     );
-    const filas = Array.from(tablaActuaciones.querySelectorAll('tbody tr')).map((fila) => {
-      const celdas = Array.from(fila.querySelectorAll('td')).map((td) => td.innerText.trim());
-      const registro = {};
-      celdas.forEach((valor, idx) => {
-        const clave = columnas[idx] || `col_${idx}`;
-        registro[clave] = valor;
+    const filas = Array.from(tablaActuaciones.querySelectorAll('tr'))
+      .map((fila) => Array.from(fila.querySelectorAll('td')).map((td) => td.innerText.trim()))
+      .filter((celdas) => celdas.length > 0)
+      .map((celdas) => {
+        const registro = {};
+        celdas.forEach((valor, idx) => {
+          const clave = columnas[idx] || `col_${idx}`;
+          registro[clave] = valor;
+        });
+        return registro;
       });
-      return registro;
-    });
     return { filas, encabezadosDisponibles: encabezadosVistos };
   });
 
