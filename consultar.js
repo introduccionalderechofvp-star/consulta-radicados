@@ -346,48 +346,89 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
   console.log(`\n[${alias ?? numero}] Consultando ${numero}…`);
   const estado = await realizarBusqueda(page, numero);
 
-  if (estado === 'detalle') {
-    const r = await procesarDetalle(page, numero, alias ?? numero, directorioSalida);
-    return [r];
+  if (estado === 'detalle' || estado === 'listado') {
+    if (estado === 'listado') {
+      const fila = page.locator('table tr').filter({ hasText: numero }).first();
+      await entrarAlDetalleDesdeFila(page, fila);
+    }
+    try {
+      const r = await procesarDetalle(page, numero, alias ?? numero, directorioSalida);
+      return [{ ok: true, subindice: null, resultado: r }];
+    } catch (err) {
+      return [{ ok: false, subindice: null, error: err.message }];
+    }
   }
 
-  if (estado === 'listado') {
-    const fila = page.locator('table tr').filter({ hasText: numero }).first();
-    await entrarAlDetalleDesdeFila(page, fila);
-    const r = await procesarDetalle(page, numero, alias ?? numero, directorioSalida);
-    return [r];
-  }
-
-  // estado === 'varios-registros': hay N coincidencias en la lista.
+  // estado === 'varios-registros'
   const cantidad = await page.locator('table tr').filter({ hasText: numero }).count();
   console.log(
     `  ℹ Encontradas ${cantidad} coincidencias para este radicado; consultaré cada una.`,
   );
 
-  const resultados = [];
+  const salidas = [];
   for (let i = 0; i < cantidad; i += 1) {
-    const sufijoIdx = `-${String(i + 1).padStart(2, '0')}`;
+    const subindice = i + 1;
+    const sufijoIdx = `-${String(subindice).padStart(2, '0')}`;
     const aliasCompleto = `${alias ?? numero}${sufijoIdx}`;
 
-    // Para la segunda y siguientes iteraciones re-hacemos la búsqueda desde
-    // cero para volver a un estado limpio del listado.
     if (i > 0) {
-      await realizarBusqueda(page, numero);
+      try {
+        await realizarBusqueda(page, numero);
+      } catch (err) {
+        console.error(`  ✘ Re-búsqueda para coincidencia ${subindice}/${cantidad}: ${err.message}`);
+        salidas.push({ ok: false, subindice, error: `re-búsqueda: ${err.message}` });
+        continue;
+      }
     }
 
     const fila = page.locator('table tr').filter({ hasText: numero }).nth(i);
     try {
       await entrarAlDetalleDesdeFila(page, fila);
       const r = await procesarDetalle(page, numero, aliasCompleto, directorioSalida);
-      resultados.push(r);
+      salidas.push({ ok: true, subindice, resultado: r });
     } catch (err) {
       console.error(
-        `  ✘ Error procesando coincidencia ${i + 1}/${cantidad} (${aliasCompleto}): ${err.message}`,
+        `  ✘ Error procesando coincidencia ${subindice}/${cantidad} (${aliasCompleto}): ${err.message}`,
       );
+      salidas.push({ ok: false, subindice, error: err.message });
     }
   }
 
-  return resultados;
+  return salidas;
+}
+
+// Errores que consideramos transitorios (vale la pena reintentar). El
+// "no generó resultados" y similares NO entran, porque son respuestas
+// legítimas del portal, no fallas de red o render.
+const PATRONES_TRANSITORIOS = [
+  /Timeout \d+ms exceeded/i,
+  /No logré interpretar el estado/i,
+  /net::ERR_/i,
+];
+
+function esErrorTransitorio(mensaje) {
+  if (!mensaje) return false;
+  return PATRONES_TRANSITORIOS.some((re) => re.test(mensaje));
+}
+
+function aliasConSubindice(alias, subindice) {
+  if (subindice == null) return alias ?? '';
+  const pad = String(subindice).padStart(2, '0');
+  return `${alias ?? ''}-${pad}`;
+}
+
+async function procesarRadicado(page, { numero, alias }, directorioSalida) {
+  try {
+    return await consultarRadicado(page, numero, alias, directorioSalida);
+  } catch (error) {
+    console.error(`  ✘ Error con ${numero}:`, error.message);
+    const rutaError = path.join(
+      directorioSalida,
+      `error_${numero}_${timestampParaNombre(new Date())}.png`,
+    );
+    await page.screenshot({ path: rutaError, fullPage: true }).catch(() => {});
+    return [{ ok: false, subindice: null, error: error.message }];
+  }
 }
 
 async function main() {
@@ -413,47 +454,57 @@ async function main() {
   });
   const page = await context.newPage();
 
-  const resumen = [];
-  for (const { numero, alias } of radicados) {
-    try {
-      const resultados = await consultarRadicado(page, numero, alias, directorioSalida);
-      if (resultados.length === 0) {
-        resumen.push({ numero, alias, ok: false, error: 'No se pudo procesar ninguna coincidencia.' });
-      } else if (resultados.length === 1) {
-        resumen.push({
-          numero,
-          alias,
-          ok: true,
-          total: resultados[0].totalActuacionesEnPortal,
-        });
-      } else {
-        resultados.forEach((r, idx) => {
-          resumen.push({
-            numero,
-            alias: `${alias ?? ''}-${String(idx + 1).padStart(2, '0')}`,
-            ok: true,
-            total: r.totalActuacionesEnPortal,
-          });
-        });
+  // Primer pase.
+  const entradas = [];
+  for (const radicado of radicados) {
+    const salidas = await procesarRadicado(page, radicado, directorioSalida);
+    salidas.forEach((s) => entradas.push({ ...radicado, ...s }));
+  }
+
+  // Identificar qué radicados necesitan reintento (con al menos una falla
+  // transitoria). Reintentamos el radicado completo, no subprocesos sueltos.
+  const radicadosAReintentar = new Set();
+  for (const e of entradas) {
+    if (!e.ok && esErrorTransitorio(e.error)) {
+      radicadosAReintentar.add(e.numero);
+    }
+  }
+
+  if (radicadosAReintentar.size > 0) {
+    console.log(
+      `\n=== Reintentando ${radicadosAReintentar.size} radicado(s) con fallas transitorias ===`,
+    );
+    for (const numero of radicadosAReintentar) {
+      const radicado = radicados.find((r) => r.numero === numero);
+      if (!radicado) continue;
+      const nuevas = await procesarRadicado(page, radicado, directorioSalida);
+      // Reemplazar en la lista de entradas todas las del mismo número.
+      for (let i = entradas.length - 1; i >= 0; i -= 1) {
+        if (entradas[i].numero === numero) entradas.splice(i, 1);
       }
-    } catch (error) {
-      console.error(`  ✘ Error con ${numero}:`, error.message);
-      const rutaError = path.join(
-        directorioSalida,
-        `error_${numero}_${timestampParaNombre(new Date())}.png`,
-      );
-      await page.screenshot({ path: rutaError, fullPage: true }).catch(() => {});
-      resumen.push({ numero, alias, ok: false, error: error.message });
+      nuevas.forEach((s) => entradas.push({ ...radicado, ...s, reintentado: true }));
     }
   }
 
   await browser.close();
 
   console.log('\n=== Resumen ===');
-  for (const r of resumen) {
-    const estado = r.ok ? `OK (${r.total} actuaciones)` : `FALLA (${r.error})`;
-    console.log(`  ${r.alias ?? ''} ${r.numero}: ${estado}`);
+  let okCount = 0;
+  let fallaCount = 0;
+  for (const e of entradas) {
+    const aliasMostrado = aliasConSubindice(e.alias, e.subindice);
+    const marca = e.reintentado ? ' [reintento]' : '';
+    if (e.ok) {
+      okCount += 1;
+      console.log(
+        `  ${aliasMostrado} ${e.numero}: OK (${e.resultado.totalActuacionesEnPortal} actuaciones)${marca}`,
+      );
+    } else {
+      fallaCount += 1;
+      console.log(`  ${aliasMostrado} ${e.numero}: FALLA (${e.error})${marca}`);
+    }
   }
+  console.log(`\nTotal: ${okCount} OK, ${fallaCount} fallas.`);
 }
 
 main().catch((err) => {
