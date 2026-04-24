@@ -75,43 +75,45 @@ async function consultarRadicado(page, numero, alias, directorioSalida) {
     }
   }
 
-  // Abrir la pestaña de Actuaciones. El portal usa Angular Material, así que
-  // probamos selectores específicos de esa librería. Si todo falla, hacemos
-  // el clic desde JS buscando el nodo con texto exacto "ACTUACIONES".
-  const clickActuaciones = await page.evaluate(() => {
-    const normalizar = (t) => (t ?? '').replace(/\s+/g, ' ').trim().toUpperCase();
-    const candidatos = Array.from(
-      document.querySelectorAll(
-        'mat-tab-label, .mat-tab-label, .mat-mdc-tab, .mdc-tab, [role="tab"], ' +
-          'a, button, li, div, span',
-      ),
-    );
-    const exacto = candidatos.find((el) => normalizar(el.textContent) === 'ACTUACIONES');
-    if (!exacto) return { ok: false, motivo: 'no-encontrado' };
-    // Subir al ancestro clicable más cercano (mat-tab-label, button, a, li).
-    let objetivo = exacto;
-    for (let i = 0; i < 6 && objetivo.parentElement; i += 1) {
-      const etiqueta = objetivo.tagName.toLowerCase();
-      if (
-        etiqueta === 'button' ||
-        etiqueta === 'a' ||
-        etiqueta === 'li' ||
-        objetivo.getAttribute('role') === 'tab' ||
-        objetivo.classList.contains('mat-tab-label') ||
-        objetivo.classList.contains('mat-mdc-tab') ||
-        objetivo.classList.contains('mdc-tab')
-      ) {
-        break;
-      }
-      objetivo = objetivo.parentElement;
-    }
-    objetivo.scrollIntoView({ block: 'center' });
-    objetivo.click();
-    return { ok: true, etiqueta: objetivo.tagName, clase: objetivo.className };
-  });
+  // Abrir la pestaña de Actuaciones. Usamos locators nativos de Playwright
+  // (disparan eventos de mouse reales, a diferencia de element.click() en JS,
+  // que Angular Material a veces ignora). Probamos de más específico a más
+  // genérico; el último recurso es un XPath que busca cualquier elemento
+  // cuyo texto propio (sin descendientes) sea exactamente "ACTUACIONES".
+  const estrategiasTab = [
+    () => page.locator('mat-tab-label').filter({ hasText: 'ACTUACIONES' }),
+    () => page.locator('.mat-tab-label').filter({ hasText: 'ACTUACIONES' }),
+    () => page.locator('.mat-mdc-tab').filter({ hasText: 'ACTUACIONES' }),
+    () => page.locator('.mdc-tab').filter({ hasText: 'ACTUACIONES' }),
+    () => page.locator('[role="tab"]').filter({ hasText: 'ACTUACIONES' }),
+    () => page.locator('a, button').filter({ hasText: /^\s*ACTUACIONES\s*$/ }),
+    () => page.locator('xpath=//*[normalize-space(text())="ACTUACIONES"]'),
+  ];
 
-  if (!clickActuaciones.ok) {
-    console.warn(`  ⚠ No encontré la pestaña Actuaciones (${clickActuaciones.motivo}).`);
+  let estrategiaUsada = null;
+  for (const obtener of estrategiasTab) {
+    const locator = obtener();
+    if ((await locator.count()) === 0) continue;
+    try {
+      await locator.first().scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+      await locator.first().click({ timeout: 5000 });
+      estrategiaUsada = obtener.toString().match(/\('(.+?)'\)|locator\((.+?)\)/)?.[0] ?? 'desconocida';
+      break;
+    } catch {
+      // Probar siguiente.
+    }
+  }
+
+  if (!estrategiaUsada) {
+    console.warn('  ⚠ No pude hacer clic en la pestaña Actuaciones. Guardando HTML para depurar.');
+    const rutaHtml = path.join(
+      directorioSalida,
+      `dump_${numero}_${timestampParaNombre(new Date())}.html`,
+    );
+    await writeFile(rutaHtml, await page.content(), 'utf8').catch(() => {});
+    console.warn(`    HTML guardado en: ${rutaHtml}`);
+  } else {
+    console.log(`  ✔ Clic en Actuaciones con estrategia: ${estrategiaUsada}`);
   }
 
   // Esperar a que aparezca la tabla con filas (tras el tab-switch el render
