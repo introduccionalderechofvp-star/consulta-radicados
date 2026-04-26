@@ -27,7 +27,7 @@ if not exist node_modules\ (
         exit /b 1
     )
     echo.
-    echo   Descargando Chromium para Playwright (unos 150 MB)...
+    echo   Descargando Chromium para Playwright ^(unos 150 MB^)...
     call npx playwright install chromium
     echo.
 )
